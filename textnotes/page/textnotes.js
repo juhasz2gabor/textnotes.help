@@ -9,11 +9,13 @@ var dialog = null;
 
 var activeTaskItem = null;
 var openTrashbin = null;
+var displayMode = null;
 var currentCursorPosition = null;
 var notificationTimerId = 0;
 
 var disableTabInTextArea = false;
 var capslockonSimulation = false;
+var autoDarkModeSimulation = false;
 
 async function initTextNotes() {
     log = await Logger.create();
@@ -103,7 +105,7 @@ function startTextNotes() {
     update();
     registerPage();
     log.debug("[EXIT]");
-    }
+}
 
 function startTextNotes2() {
     newVersionMessage();
@@ -167,6 +169,7 @@ function loadUIState() {
 
     activeTaskItem = getUIState("activeTaskItem");
     openTrashbin = Boolean(getUIState("openTrashbin"));
+    displayMode = getUIState("displayMode");
 
     log.debug("[EXIT]");
 }
@@ -178,6 +181,7 @@ function update() {
     updateTaskList();
     setActiveItem(activeTaskItem);
     model.resetChanged();
+    setDisplayMode();
     setPageVisible();
     document.getElementById("taskList").focus();
 
@@ -188,16 +192,21 @@ function newVersionMessage()
 {
     let welcomeMessage =
               "Thanks for using TextNotes!\n\n"
-            + "New things in version 1.5 :\n";
+            + "New things in version 1.7 :\n\n";
 
-    welcomeMessage +=
-              "- Export data to text file\n"
+    welcomeMessage += ""
+            + "- Display modes : dark, light, auto\n"
+            + "- Creating notes from webpages : appending to top note\n"
             + "- Minor bug fixes\n"
 
     welcomeMessage +=
-            "\nif you find a bug, please report it to me :\ngabor.shepherd.work@gmail.com"
+            "\nif you find a bug, please report it : gabor.shepherd.work@gmail.com\n"
+
+    welcomeMessage += "\nPlease always update to the latest version of TextNotes.\n"
+                      + "The old versions may not work properly with the latest Firefox!\n"
 
     let getHandler = (messageVersion) => {
+        log.info("messageVersion :" + messageVersion + ", model._version :" + model._version);
         if (messageVersion != model._version) {
             alert(welcomeMessage);
             let prefix = "In newVersionMessage::getHandler() : "
@@ -219,6 +228,32 @@ function setPageVisible() {
     log.trace("[START]");
     document.querySelector("body").style.visibility = "visible";
     log.trace("[EXIT]");
+}
+
+function setDisplayMode() {
+    log.debug("DisplayMode : " + displayMode);
+
+    switch(displayMode)
+    {
+        case "light" :
+            log.debug("Selected mode : case::light");
+            document.body.removeAttribute('data-theme', 'dark');
+        break;
+
+        case "dark" :
+            log.debug("Selected mode : case::dark");
+            document.body.setAttribute('data-theme', 'dark');
+        break;
+
+        default:
+            if (window.matchMedia('(prefers-color-scheme: dark)').matches || autoDarkModeSimulation) {
+                log.debug("Selected mode : default::dark");
+                document.body.setAttribute('data-theme', 'dark');
+            } else {
+                log.debug("Selected mode : default::light");
+                document.body.removeAttribute('data-theme', 'dark');
+            }
+    }
 }
 
 function setPageEvents() {
@@ -312,8 +347,8 @@ function setPageEvents() {
 
         if (msg.hasOwnProperty("type") && msg["type"] === "new-note"
             && msg.hasOwnProperty("target") && msg["target"] === log.getTabId()) {
-            if (msg.hasOwnProperty("text")) {
-                externalAddNoteAction(msg["text"]);
+            if (msg.hasOwnProperty("text") && msg.hasOwnProperty("new")) {
+                externalAddSelectedText(msg["text"], msg["new"]);
             } else {
                 log.warning("Message was invalid : " + JSON.stringify(msg))
             }
@@ -386,7 +421,7 @@ function setTextAreaEvents() {
 function selectUrlInTextAreaAtCursor() {
     log.debug("[START]")
 
-    let urlRe = /^((http|https|ftp|file):\/\/?)[^\s()<>]+(?:\([\w\d]+\)|([^[:punct:]\s]|\/?))/;
+    let urlRe = /^((http|https|ftp):\/\/?)[^\s()<>]+(?:\([\w\d]+\)|([^[:punct:]\s]|\/?))/;
     let wsRe = /\s/;
 
     let getIndexAtEndOfWord = (string, begin) => {
@@ -586,11 +621,16 @@ function keyDownEventsOnTextArea(event) {
 
     if (!event.shiftKey)
     {
+        let textArea = document.getElementById("textArea");
         const tab = "\t";
-        const start = document.activeElement.selectionStart
-        const end = document.activeElement.selectionEnd;
 
-        document.getElementById("textArea").setRangeText(tab, start, end, "end");
+        if (textArea.selectionDirection === "forward") {
+            textArea.selectionStart = textArea.selectionEnd;
+        } else {
+            textArea.selectionEnd = textArea.selectionStart;
+        }
+
+        textArea.setRangeText(tab, textArea.selectionStart, textArea.selectionStart, "end");
         textAreaChanged();
 
         event.preventDefault();
@@ -770,26 +810,6 @@ function addNoteAction() {
     log.debug("[EXIT]");
 }
 
-function externalAddNoteAction(text)
-{
-    log.debug("[START]");
-    log.trace("Text :" + text);
-
-    let leafId = model.addLeaf("ITEM", false, text);
-    model.moveLeafAfterLeaf2(leafId, "taskListTop");
-    updateTaskList()
-    setActiveItem(leafId);
-    model.save();
-
-    const message = "Add selected text as a new note";
-    const durationMs = 2000;
-    showNotification(message, durationMs);
-
-    log.debug("[EXIT]");
-
-    return leafId;
-}
-
 function addSeparatorAction() {
     log.debug("[START]");
 
@@ -848,6 +868,61 @@ function deleteNoteAction() {
     setActiveItem(model.getRoot()[itemIndex]);
 
     log.debug("[EXIT]");
+}
+
+function externalAddSelectedText(text, newNote)
+{
+    log.debug("[START]");
+    log.trace("Text :" + text);
+    log.trace("NewNote :" + newNote);
+
+    let returnId;
+    let topLeafId = model.getRoot()[0];
+    let topLeaf = model.getLeaf(topLeafId);
+
+
+    log.debug("topLeaf.type : " + topLeaf.type);
+    if (newNote || topLeaf.type !== "ITEM") {
+        log.debug("Adding to a new note");
+
+        let newLeafId = model.addLeaf("ITEM", false, text.trim() + "\n");
+        model.moveLeafAfterLeaf2(newLeafId, "taskListTop");
+        updateTaskList()
+        setActiveItem(newLeafId);
+        model.save();
+
+        const message = "Add selected text as a new note";
+        const durationMs = 2000;
+        showNotification(message, durationMs);
+
+        returnId = newLeafId;
+    } else {
+        log.debug("Adding into the top note");
+
+        let newText;
+
+        if (0 ===  topLeaf.text.trimEnd().length) {
+            newText = text.trim() + "\n";
+        } else {
+            newText = topLeaf.text.trimEnd() + "\n--------\n" + text.trim() + "\n";
+        }
+
+        model.setText(topLeafId, newText);
+
+        updateTaskList()
+        setActiveItem(topLeafId);
+        model.save();
+
+        const message = "Add selected text into the top note";
+        const durationMs = 2000;
+        showNotification(message, durationMs);
+
+        returnId = topLeafId;
+    }
+
+    log.debug("[EXIT]");
+
+    return returnId;
 }
 
 function textAreaChanged(event) {
@@ -1084,7 +1159,7 @@ function openPreferenceDialog() {
     let title = "Preferences";
     let source = "page/dialogs/preferences/preferences.html";
     let width = 650;
-    let height = 215;
+    let height = 280;
 
     model.save();
     dialog.show(title, source, width, height);
@@ -1094,7 +1169,7 @@ function openHelpDialog() {
     let title = "Help";
     let source = "page/dialogs/help/help.html"
     let width = 770;
-    let height = 560;
+    let height = 600;
 
     dialog.show(title, source, width, height);
 }
